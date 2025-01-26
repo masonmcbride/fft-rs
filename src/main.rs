@@ -4,6 +4,50 @@ use std::fmt;
 
 struct TextField([u8; 4]);
 
+struct Header {
+    chunk_id: TextField, // "RIFF" -- RIFF Format
+    chunk_size: u32,     //  Number of bytes minus 8 -- the first 8 bytes
+    format: TextField,   // "WAVE" -- it's a wave file
+}
+
+struct FmtChunk {
+    chunk_id: TextField, // "fmt "
+    chunk_size: u32,    // Chunk size: 16, 18 or 40
+    audio_format: u16,  // Format code: PCM = 1
+    num_channels: u16,  // Mono = 1, Stereo = 2, etc.
+    sample_rate: u32,   // Samples per second 44100, 48000, etc.
+    byte_rate: u32,     // sample_rate * block_align
+    block_align: u16,    // data block size: num_channels * bits_per_sample/8
+    bits_per_sample: u16, // 8 bits, 16 bits, etc.
+}
+
+struct ListChunk {
+    chunk_id: TextField,
+    chunk_size: u32,
+    list_type_id: TextField,
+    data: Vec<ListDataChunk>
+
+}
+
+struct ListDataChunk {
+    info_id: TextField,
+    info_size: u32,
+    info: String,
+}
+
+struct DataChunk {
+    chunk_id: TextField,    // "data"
+    chunk_size: u32,    // Number of bytes in data
+    data: Vec<i16>,          // The actual audio data
+}
+
+struct FfmpegWavFile {
+    header: Header,
+    fmt: FmtChunk,
+    list: ListChunk,
+    data: DataChunk
+}
+
 impl TextField {
     fn to_string(&self) -> String {
         String::from_utf8_lossy(&self.0).to_string()
@@ -35,12 +79,6 @@ fn buffer_to_u32(buffer: &[u8]) -> u32 {
     u32::from_le_bytes(buffer[0..4].try_into().unwrap())
 }
 
-struct Header {
-    chunk_id: TextField, // "RIFF" -- RIFF Format
-    chunk_size: u32,     //  Number of bytes minus 8 -- the first 8 bytes
-    format: TextField,   // "WAVE" -- it's a wave file
-}
-
 impl Header {
     fn read(file: &mut File) -> Self {
         let mut buffer = [0u8; 12];
@@ -51,17 +89,6 @@ impl Header {
             format: buffer_to_textfield(&buffer[8..12])
         }
     }
-}
-
-struct FmtChunk {
-    chunk_id: TextField, // "fmt "
-    chunk_size: u32,    // Chunk size: 16, 18 or 40
-    audio_format: u16,  // Format code: PCM = 1
-    num_channels: u16,  // Mono = 1, Stereo = 2, etc.
-    sample_rate: u32,   // Samples per second 44100, 48000, etc.
-    byte_rate: u32,     // sample_rate * block_align
-    block_align: u16,    // data block size: num_channels * bits_per_sample/8
-    bits_per_sample: u16, // 8 bits, 16 bits, etc.
 }
 
 impl FmtChunk{
@@ -77,11 +104,6 @@ impl FmtChunk{
             bits_per_sample: buffer_to_u16(&buffer[14..16])
         })
     }
-}
-struct ListDataChunk {
-    info_id: TextField,
-    info_size: u32,
-    info: String,
 }
 
 impl ListDataChunk {
@@ -119,14 +141,6 @@ impl fmt::Display for ListDataChunk {
     }
 }
 
-struct ListChunk {
-    chunk_id: TextField,
-    chunk_size: u32,
-    list_type_id: TextField,
-    data: Vec<ListDataChunk>
-
-}
-
 impl ListChunk {
 
     fn parse(buffer: &[u8], chunk_id: TextField, chunk_size: u32) -> Option<Self> {
@@ -144,7 +158,6 @@ impl ListChunk {
             }
         }
 
-
         Some(ListChunk {
             chunk_id,
             chunk_size,
@@ -152,12 +165,6 @@ impl ListChunk {
             data
         })
     }
-}
-
-struct DataChunk {
-    chunk_id: TextField,    // "data"
-    chunk_size: u32,    // Number of bytes in data
-    data: Vec<i16>,          // The actual audio data
 }
 
 impl DataChunk {
@@ -174,13 +181,6 @@ impl DataChunk {
             data: samples
         })
     }
-}
-
-struct FfmpegWavFile {
-    header: Header,
-    fmt: FmtChunk,
-    list: ListChunk,
-    data: DataChunk
 }
 
 impl FfmpegWavFile {
@@ -231,39 +231,41 @@ impl FfmpegWavFile {
             list: list.unwrap(),
             data: data.unwrap()
         })
+    }
 
+    fn info(self) {
+        println!("RIFF Header Chunk ID: {}", self.header.chunk_id);
+        println!("File Size (Minus 8 bytes): {}", self.header.chunk_size);
+        println!("RIFF File Format: {}", self.header.format);
+
+        println!("\nFMT Subchunk:");
+        println!("  Chunk ID: {}", self.fmt.chunk_id);
+        println!("  Subchunk1 Size: {}", self.fmt.chunk_size);
+        println!("  Audio Format: {}", self.fmt.audio_format);
+        println!("  Number of Channels: {}", self.fmt.num_channels);
+        println!("  Sample Rate: {}", self.fmt.sample_rate);
+        println!("  Byte Rate: {}", self.fmt.byte_rate);
+        println!("  Block Align: {}", self.fmt.block_align);
+        println!("  Bits Per Sample: {}", self.fmt.bits_per_sample);
+
+        println!("\nLIST Subchunk:");
+        println!("  Chunk ID: {}", self.list.chunk_id);
+        println!("  Chunk Size: {}", self.list.chunk_size);
+        println!("  List Type ID: {}", self.list.list_type_id);
+        println!("  Data Subchunks Length: {}", self.list.data.len());
+        for (i, subchunk) in self.list.data.iter().enumerate() {
+            println!("\n  Subchunk {}:", i + 1);
+            println!("    {}", subchunk);
+        }
+        println!("\nDATA Subchunk:");
+        println!("  Chunk ID: {}", self.data.chunk_id);
+        println!("  Chunk Size: {}", self.data.chunk_size);
+        println!("  Data Length: {} samples", self.data.data.len());
     }
 
 }
 fn main() {
     let mut file = File::open("knchoe.wav").expect("File could not be opened");
     let wav_file = FfmpegWavFile::parse(&mut file).expect("Failed to parse WAV file");
-
-    println!("RIFF Header Chunk ID: {}", wav_file.header.chunk_id);
-    println!("File Size (Minus 8 bytes): {}", wav_file.header.chunk_size);
-    println!("RIFF File Format: {}", wav_file.header.format);
-
-    println!("\nFMT Subchunk:");
-    println!("  Chunk ID: {}", wav_file.fmt.chunk_id);
-    println!("  Subchunk1 Size: {}", wav_file.fmt.chunk_size);
-    println!("  Audio Format: {}", wav_file.fmt.audio_format);
-    println!("  Number of Channels: {}", wav_file.fmt.num_channels);
-    println!("  Sample Rate: {}", wav_file.fmt.sample_rate);
-    println!("  Byte Rate: {}", wav_file.fmt.byte_rate);
-    println!("  Block Align: {}", wav_file.fmt.block_align);
-    println!("  Bits Per Sample: {}", wav_file.fmt.bits_per_sample);
-
-    println!("\nLIST Subchunk:");
-    println!("  Chunk ID: {}", wav_file.list.chunk_id);
-    println!("  Chunk Size: {}", wav_file.list.chunk_size);
-    println!("  List Type ID: {}", wav_file.list.list_type_id);
-    println!("  Data Subchunks Length: {}", wav_file.list.data.len());
-    for (i, subchunk) in wav_file.list.data.iter().enumerate() {
-        println!("\n  Subchunk {}:", i + 1);
-        println!("    {}", subchunk);
-    }
-    println!("\nDATA Subchunk:");
-    println!("  Chunk ID: {}", wav_file.data.chunk_id);
-    println!("  Chunk Size: {}", wav_file.data.chunk_size);
-    println!("  Data Length: {} samples", wav_file.data.data.len());
+    wav_file.info();
 }
