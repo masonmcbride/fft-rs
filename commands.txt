@@ -1,0 +1,2 @@
+ffmpeg -list_devices true -f dshow -i dummy
+ffmpeg -f dshow -i audio="Headset Microphone (4- Astro A50 Voice)" -t 2 output.wav
