@@ -1,1 +1,252 @@
-use std::fs::File; use std::io::Read; use std::fmt; struct TextField([u8; 4]); impl TextField { fn to_string(&self) -> String { String::from_utf8_lossy(&self.0).to_string() } } impl From<&[u8]> for TextField { fn from(bytes: &[u8]) -> Self { let four_bytes: &[u8; 4] = bytes.try_into().unwrap(); TextField(*four_bytes) } } impl fmt::Display for TextField { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.to_string()) } } fn buffer_to_textfield(buffer: &[u8]) -> TextField { buffer[0..4].try_into().unwrap() } fn buffer_to_u16(buffer: &[u8]) -> u16 { u16::from_le_bytes(buffer[0..2].try_into().unwrap()) } fn buffer_to_u32(buffer: &[u8]) -> u32 { u32::from_le_bytes(buffer[0..4].try_into().unwrap()) } struct Header { chunk_id: TextField, // "RIFF" -- RIFF Format chunk_size: u32, // Number of bytes minus 8 -- the first 8 bytes format: TextField, // "WAVE" -- it's a wave file } impl Header { fn read(file: &mut File) -> Self { let mut buffer = [0u8; 12]; file.read_exact(&mut buffer).expect("Is file missing header?"); Header { chunk_id: buffer_to_textfield(&buffer[0..4]), chunk_size: buffer_to_u32(&buffer[4..8]), format: buffer_to_textfield(&buffer[8..12]) } } } struct FmtChunk { chunk_id: TextField, // "fmt " chunk_size: u32, // Chunk size: 16, 18 or 40 audio_format: u16, // Format code: PCM = 1 num_channels: u16, // Mono = 1, Stereo = 2, etc. sample_rate: u32, // Samples per second 44100, 48000, etc. byte_rate: u32, // sample_rate * block_align block_align: u16, // data block size: num_channels * bits_per_sample/8 bits_per_sample: u16, // 8 bits, 16 bits, etc. } impl FmtChunk{ fn parse(buffer: &[u8], chunk_id: TextField, chunk_size: u32) -> Option<Self> { Some(FmtChunk { chunk_id: chunk_id, chunk_size: chunk_size, audio_format: buffer_to_u16(&buffer[0..2]), num_channels: buffer_to_u16(&buffer[2..4]), sample_rate: buffer_to_u32(&buffer[4..8]), byte_rate: buffer_to_u32(&buffer[8..12]), block_align: buffer_to_u16(&buffer[12..14]), bits_per_sample: buffer_to_u16(&buffer[14..16]) }) } } struct ListDataChunk { info_id: TextField, info_size: u32, info: String, } impl ListDataChunk { fn parse(buffer: &[u8], offset: usize) -> Option<(ListDataChunk, usize)> { let info_id = buffer_to_textfield(&buffer[offset..offset+4]); let info_size = buffer_to_u32(&buffer[offset+4..offset+8]); let subchunk_data = &buffer[offset+8..offset+8+info_size as usize]; let info = match std::str::from_utf8(subchunk_data) { Ok(s) => s.trim_end_matches('\0').to_string(), Err(_) => { return Option::None; } }; let new_offset = offset + 8 + info_size as usize + info_size as usize % 2; Some(( ListDataChunk { info_id, info_size, info, }, new_offset, )) } } impl fmt::Display for ListDataChunk { fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { // Format: ID: <info_id>, Size: <info_size>, Info: <info> write!( f, "Info type: {}\n Size: {}\n Info: {}", self.info_id, self.info_size, self.info ) } } struct ListChunk { chunk_id: TextField, chunk_size: u32, list_type_id: TextField, data: Vec<ListDataChunk> } impl ListChunk { fn parse(buffer: &[u8], chunk_id: TextField, chunk_size: u32) -> Option<Self> { let list_type_id = buffer_to_textfield(&buffer[0..4]); let mut data = Vec::new(); let mut offset = 4; while offset + 8 <= buffer.len() { match ListDataChunk::parse(buffer, offset) { Some((subchunk, new_offset)) => { data.push(subchunk); offset = new_offset; }, None => { break; } } } Some(ListChunk { chunk_id, chunk_size, list_type_id, data }) } } struct DataChunk { chunk_id: TextField, // "data" chunk_size: u32, // Number of bytes in data data: Vec<i16>, // The actual audio data } impl DataChunk { fn parse(buffer: &[u8], chunk_id: TextField, chunk_size: u32) -> Option<Self> { let mut samples = Vec::with_capacity((chunk_size / 2) as usize); for i in (0..chunk_size as usize).step_by(2) { let sample = i16::from_le_bytes(buffer[i..i+2].try_into().unwrap()); samples.push(sample); } Some(DataChunk { chunk_id, chunk_size, data: samples }) } } struct FfmpegWavFile { header: Header, fmt: FmtChunk, list: ListChunk, data: DataChunk } impl FfmpegWavFile { fn parse(file: &mut File) -> Option<Self> { let header = Header::read(file); if header.chunk_id.to_string() != "RIFF" || header.format.to_string() != "WAVE" { println!("Not the correct RIFF/WAVE header format"); return None } let mut fmt: Option<FmtChunk> = Option::None; let mut list: Option<ListChunk> = Option::None; let mut data: Option<DataChunk> = Option::None; loop { let mut chunk_header = [0u8; 8]; match file.read_exact(&mut chunk_header) { Ok(_) => {}, Err(_) => { break; } } let chunk_id = buffer_to_textfield(&chunk_header[0..4]); let chunk_size = buffer_to_u32(&chunk_header[4..8]); let mut chunk_data = vec![0u8; chunk_size as usize]; match file.read_exact(&mut chunk_data) { Ok(_) => {}, Err(_) => { break; } } match chunk_id.to_string().as_str() { "fmt " => { fmt = FmtChunk::parse(&chunk_data, chunk_id, chunk_size); }, "LIST" => { list = ListChunk::parse(&chunk_data, chunk_id, chunk_size); }, "data" => { data = DataChunk::parse(&chunk_data, chunk_id, chunk_size); }, _ => { } }; } Some(FfmpegWavFile { header, fmt: fmt.unwrap(), list: list.unwrap(), data: data.unwrap() }) } } fn main() { let mut file = File::open("knchoe.wav").expect("File could not be opened"); let wav_file = FfmpegWavFile::parse(&mut file).expect("Failed to parse WAV file"); println!("RIFF Header Chunk ID: {}", wav_file.header.chunk_id); println!("File Size (Minus 8 bytes): {}", wav_file.header.chunk_size); println!("RIFF File Format: {}", wav_file.header.format); println!("\nFMT Subchunk:"); println!(" Chunk ID: {}", wav_file.fmt.chunk_id); println!(" Subchunk1 Size: {}", wav_file.fmt.chunk_size); println!(" Audio Format: {}", wav_file.fmt.audio_format); println!(" Number of Channels: {}", wav_file.fmt.num_channels); println!(" Sample Rate: {}", wav_file.fmt.sample_rate); println!(" Byte Rate: {}", wav_file.fmt.byte_rate); println!(" Block Align: {}", wav_file.fmt.block_align); println!(" Bits Per Sample: {}", wav_file.fmt.bits_per_sample); println!("\nLIST Subchunk:"); println!(" Chunk ID: {}", wav_file.list.chunk_id); println!(" Chunk Size: {}", wav_file.list.chunk_size); println!(" List Type ID: {}", wav_file.list.list_type_id); println!(" Data Subchunks Length: {}", wav_file.list.data.len()); for (i, subchunk) in wav_file.list.data.iter().enumerate() { println!("\n Subchunk {}:", i + 1); println!(" {}", subchunk); } println!("\nDATA Subchunk:"); println!(" Chunk ID: {}", wav_file.data.chunk_id); println!(" Chunk Size: {}", wav_file.data.chunk_size); println!(" Data Length: {} samples", wav_file.data.data.len()); }
+use std::fs::File;
+use std::io::{self, Read};
+
+// helper: turn a 4-byte code like b"RIFF" into "RIFF"
+fn fourcc_to_string(id: [u8;4]) -> String {
+    String::from_utf8_lossy(&id).to_string()
+}
+
+// ---- core structs ----
+
+#[derive(Debug)]
+struct Header {
+    chunk_id: [u8;4], // "RIFF"
+    chunk_size: u32,  // file bytes after this field, minus 8 overall header bytes
+    format:   [u8;4], // "WAVE"
+}
+
+impl Header {
+    fn read(file: &mut File) -> io::Result<Self> {
+        let mut buf = [0u8; 12];
+        file.read_exact(&mut buf)?;
+
+        Ok(Header {
+            chunk_id: buf[0..4].try_into().unwrap(),
+            chunk_size: u32::from_le_bytes(buf[4..8].try_into().unwrap()),
+            format: buf[8..12].try_into().unwrap(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct FmtChunk {
+    chunk_id: [u8;4],    // "fmt "
+    chunk_size: u32,     // usually 16 for PCM
+    audio_format: u16,   // PCM = 1
+    num_channels: u16,   // 1=mono,2=stereo,...
+    sample_rate: u32,    // 44100, 48000, ...
+    byte_rate: u32,      // sample_rate * block_align
+    block_align: u16,    // num_channels * bits_per_sample/8
+    bits_per_sample: u16 // 8, 16, 24, ...
+}
+
+impl FmtChunk {
+    fn parse(body: &[u8], hdr: &ChunkHeader) -> Self {
+        FmtChunk {
+            chunk_id: hdr.id,
+            chunk_size: hdr.size,
+            audio_format: u16::from_le_bytes(body[0..2].try_into().unwrap()),
+            num_channels: u16::from_le_bytes(body[2..4].try_into().unwrap()),
+            sample_rate: u32::from_le_bytes(body[4..8].try_into().unwrap()),
+            byte_rate:   u32::from_le_bytes(body[8..12].try_into().unwrap()),
+            block_align: u16::from_le_bytes(body[12..14].try_into().unwrap()),
+            bits_per_sample: u16::from_le_bytes(body[14..16].try_into().unwrap()),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ListDataChunk {
+    info_id:   [u8;4],
+    info_size: u32,
+    info:      String,
+}
+
+#[derive(Debug)]
+struct ListChunk {
+    chunk_id:     [u8;4],   // "LIST"
+    chunk_size:   u32,
+    list_type_id: [u8;4],   // "INFO"
+    data:         Vec<ListDataChunk>,
+}
+
+impl ListChunk {
+    fn parse(body: &[u8], hdr: &ChunkHeader) -> Self {
+        // first 4 bytes of body = list_type_id
+        let list_type_id: [u8;4] = body[0..4].try_into().unwrap();
+        let mut data_chunks = Vec::new();
+        let mut offset = 4;
+
+        // walk subchunks inside LIST
+        while offset + 8 <= body.len() {
+            let info_id: [u8;4] = body[offset..offset+4].try_into().unwrap();
+            let info_size = u32::from_le_bytes(body[offset+4..offset+8].try_into().unwrap());
+
+            let start = offset + 8;
+            let end   = start + info_size as usize;
+            if end > body.len() { break; }
+
+            // interpret text payload
+            let raw = &body[start..end];
+            if let Ok(s) = std::str::from_utf8(raw) {
+                let cleaned = s.trim_end_matches('\0').to_string();
+                data_chunks.push(ListDataChunk {
+                    info_id,
+                    info_size,
+                    info: cleaned,
+                });
+            }
+
+            // advance offset, respecting word alignment
+            let pad = (info_size as usize) % 2;
+            offset = end + pad;
+        }
+
+        ListChunk {
+            chunk_id: hdr.id,
+            chunk_size: hdr.size,
+            list_type_id,
+            data: data_chunks,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct DataChunk {
+    chunk_id:   [u8;4],   // "data"
+    chunk_size: u32,      // number of bytes in PCM payload
+    data:       Vec<i16>, // PCM16 samples
+}
+
+impl DataChunk {
+    fn parse(body: &[u8], hdr: &ChunkHeader) -> Self {
+        // interpret body as little-endian i16 frames
+        let mut samples = Vec::with_capacity((hdr.size / 2) as usize);
+        for i in (0..hdr.size as usize).step_by(2) {
+            let s = i16::from_le_bytes(body[i..i+2].try_into().unwrap());
+            samples.push(s);
+        }
+
+        DataChunk {
+            chunk_id: hdr.id,
+            chunk_size: hdr.size,
+            data: samples,
+        }
+    }
+}
+
+// tiny struct for generic chunk header
+#[derive(Clone, Copy, Debug)]
+struct ChunkHeader {
+    id:   [u8;4],
+    size: u32,
+}
+
+// read 8-byte chunk header; return None on EOF
+fn read_chunk_header(file: &mut File) -> io::Result<Option<ChunkHeader>> {
+    let mut buf = [0u8; 8];
+    match file.read_exact(&mut buf) {
+        Ok(_) => {
+            let id   = buf[0..4].try_into().unwrap();
+            let size = u32::from_le_bytes(buf[4..8].try_into().unwrap());
+            Ok(Some(ChunkHeader { id, size }))
+        }
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+// read exactly `size` bytes of body, plus eat the 1-byte pad if size is odd
+fn read_chunk_body(file: &mut File, size: u32) -> io::Result<Vec<u8>> {
+    let mut body = vec![0u8; size as usize];
+    file.read_exact(&mut body)?;
+    if (size % 2) == 1 {
+        let mut pad = [0u8;1];
+        // ignore errors on pad? we'll just try to read it
+        let _ = file.read_exact(&mut pad);
+    }
+    Ok(body)
+}
+
+#[derive(Debug)]
+struct WavFile {
+    header: Header,
+    fmt:   Option<FmtChunk>,
+    list:  Option<ListChunk>,
+    data:  Option<DataChunk>,
+}
+
+impl WavFile {
+    fn parse(file: &mut File) -> io::Result<Self> {
+        let header = Header::read(file)?;
+
+        if !(&header.chunk_id == b"RIFF" || &header.format == b"WAVE") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Not RIFF/WAVE",
+            ));
+        }
+
+        let mut fmt  = None;
+        let mut list = None;
+        let mut data = None;
+
+        while let Some(hdr) = read_chunk_header(file)? {
+            let body = read_chunk_body(file, hdr.size)?;
+
+            match &hdr.id {
+                b"fmt " => { fmt = Some(FmtChunk::parse(&body, &hdr)); }
+                b"LIST" => { list = Some(ListChunk::parse(&body, &hdr)); }
+                b"data" => { data = Some(DataChunk::parse(&body, &hdr)); }
+                _ => { /* ignore unknown chunks */ }
+            }
+        }
+
+        Ok(WavFile { header, fmt, list, data })
+    }
+}
+
+fn main() -> io::Result<()> {
+    let mut file = File::open("knchoe.wav")?;
+    let wav = WavFile::parse(&mut file)?;
+
+    println!("RIFF Header Chunk ID: {}", fourcc_to_string(wav.header.chunk_id));
+    println!("File Size (Minus 8 bytes): {}", wav.header.chunk_size);
+    println!("RIFF File Format: {}", fourcc_to_string(wav.header.format));
+
+    if let Some(fmt) = &wav.fmt {
+        println!("\nFMT Subchunk:");
+        println!("  Chunk ID: {}", fourcc_to_string(fmt.chunk_id));
+        println!("  Subchunk1 Size: {}", fmt.chunk_size);
+        println!("  Audio Format: {}", fmt.audio_format);
+        println!("  Number of Channels: {}", fmt.num_channels);
+        println!("  Sample Rate: {}", fmt.sample_rate);
+        println!("  Byte Rate: {}", fmt.byte_rate);
+        println!("  Block Align: {}", fmt.block_align);
+        println!("  Bits Per Sample: {}", fmt.bits_per_sample);
+    }
+
+    if let Some(list) = &wav.list {
+        println!("\nLIST Subchunk:");
+        println!("  Chunk ID: {}", fourcc_to_string(list.chunk_id));
+        println!("  Chunk Size: {}", list.chunk_size);
+        println!("  List Type ID: {}", fourcc_to_string(list.list_type_id));
+        println!("  Data Subchunks Length: {}", list.data.len());
+
+        for (i, sub) in list.data.iter().enumerate() {
+            println!("\n  Subchunk {}:", i + 1);
+            println!("    Info type: {}", fourcc_to_string(sub.info_id));
+            println!("    Size: {}", sub.info_size);
+            println!("    Info: {}", sub.info);
+        }
+    }
+
+    if let Some(data) = &wav.data {
+        println!("\nDATA Subchunk:");
+        println!("  Chunk ID: {}", fourcc_to_string(data.chunk_id));
+        println!("  Chunk Size: {}", data.chunk_size);
+        println!("  Data Length: {} samples", data.data.len());
+    }
+
+    Ok(())
+}
