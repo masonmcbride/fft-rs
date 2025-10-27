@@ -1,12 +1,45 @@
 use std::fs::File;
 use std::io::{self, Read};
 
-// helper: turn a 4-byte code like b"RIFF" into "RIFF"
-fn fourcc_to_string(id: [u8;4]) -> String {
-    String::from_utf8_lossy(&id).to_string()
+// ---- core structs ----
+
+#[derive(Debug)]
+struct WavFile {
+    header: Header,
+    fmt:   Option<FmtChunk>,
+    list:  Option<ListChunk>,
+    data:  Option<DataChunk>,
 }
 
-// ---- core structs ----
+impl WavFile {
+    fn parse(file: &mut File) -> io::Result<Self> {
+        let header = Header::read(file)?;
+
+        if !(&header.chunk_id == b"RIFF" || &header.format == b"WAVE") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Not RIFF/WAVE",
+            ));
+        }
+
+        let mut fmt  = None;
+        let mut list = None;
+        let mut data = None;
+
+        while let Some(hdr) = read_chunk_header(file)? {
+            let body = read_chunk_body(file, hdr.size)?;
+
+            match &hdr.id {
+                b"fmt " => { fmt = Some(FmtChunk::parse(&body, &hdr)); }
+                b"LIST" => { list = Some(ListChunk::parse(&body, &hdr)); }
+                b"data" => { data = Some(DataChunk::parse(&body, &hdr)); }
+                _ => { /* ignore unknown chunks */ }
+            }
+        }
+
+        Ok(WavFile { header, fmt, list, data })
+    }
+}
 
 #[derive(Debug)]
 struct Header {
@@ -168,42 +201,8 @@ fn read_chunk_body(file: &mut File, size: u32) -> io::Result<Vec<u8>> {
     Ok(body)
 }
 
-#[derive(Debug)]
-struct WavFile {
-    header: Header,
-    fmt:   Option<FmtChunk>,
-    list:  Option<ListChunk>,
-    data:  Option<DataChunk>,
-}
-
-impl WavFile {
-    fn parse(file: &mut File) -> io::Result<Self> {
-        let header = Header::read(file)?;
-
-        if !(&header.chunk_id == b"RIFF" || &header.format == b"WAVE") {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Not RIFF/WAVE",
-            ));
-        }
-
-        let mut fmt  = None;
-        let mut list = None;
-        let mut data = None;
-
-        while let Some(hdr) = read_chunk_header(file)? {
-            let body = read_chunk_body(file, hdr.size)?;
-
-            match &hdr.id {
-                b"fmt " => { fmt = Some(FmtChunk::parse(&body, &hdr)); }
-                b"LIST" => { list = Some(ListChunk::parse(&body, &hdr)); }
-                b"data" => { data = Some(DataChunk::parse(&body, &hdr)); }
-                _ => { /* ignore unknown chunks */ }
-            }
-        }
-
-        Ok(WavFile { header, fmt, list, data })
-    }
+fn fourcc_to_string(id: [u8;4]) -> String {
+    String::from_utf8_lossy(&id).to_string()
 }
 
 fn main() -> io::Result<()> {
